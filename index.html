@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3D-slot-4</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #07111f;
+    color: #e5e7eb;
+    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  #app {
+    position: fixed;
+    inset: 0;
+  }
+  #hud {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    right: 14px;
+    z-index: 5;
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 12px;
+    pointer-events: none;
+  }
+  .panel {
+    pointer-events: auto;
+    background: rgb(15 23 42 / 0.82);
+    border: 1px solid rgb(148 163 184 / 0.28);
+    box-shadow: 0 8px 28px rgb(0 0 0 / 0.28);
+    border-radius: 14px;
+    padding: 12px 14px;
+    backdrop-filter: blur(8px);
+  }
+  h1 {
+    margin: 0;
+    font-size: 24px;
+    letter-spacing: 0.5px;
+  }
+  #status {
+    margin-top: 6px;
+    color: #cbd5e1;
+    font-size: 15px;
+  }
+  #controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: end;
+  }
+  button {
+    border: 1px solid rgb(148 163 184 / 0.32);
+    border-radius: 10px;
+    padding: 9px 12px;
+    background: #111827;
+    color: #e5e7eb;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button:hover {
+    background: #1f2937;
+  }
+  #help {
+    position: fixed;
+    left: 14px;
+    bottom: 14px;
+    max-width: 520px;
+    color: #cbd5e1;
+    font-size: 13px;
+    line-height: 1.45;
+    z-index: 5;
+  }
+  .dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 99px;
+    vertical-align: -1px;
+    margin-right: 6px;
+  }
+  .p1 { background: #ef4444; }
+  .p2 { background: #3b82f6; }
+  #coord {
+    color: #94a3b8;
+    margin-top: 4px;
+    font-size: 13px;
+  }
+  canvas {
+    display: block;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="hud">
+  <div class="panel">
+    <h1>3D-slot-4</h1>
+    <div id="status"></div>
+    <div id="coord"></div>
+  </div>
+  <div id="controls" class="panel">
+    <button id="resetBtn">New Game</button>
+    <button id="viewBtn">Reset View</button>
+  </div>
+</div>
+
+<div id="help" class="panel">
+  Drag to rotate. Mouse wheel to zoom. Right-drag to pan. Click a glowing legal position to place a piece.
+  Legal moves are on the bottom plane or directly on top of a filled space. First player with 4 in any straight 3D line wins.
+</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js";
+import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/controls/OrbitControls.js";
+
+const N = 5;
+const WIN = 4;
+const CELL = 1.25;
+const EMPTY = 0;
+
+let board;
+let currentPlayer;
+let gameOver;
+let winningKeys;
+
+const app = document.getElementById("app");
+const statusEl = document.getElementById("status");
+const coordEl = document.getElementById("coord");
+document.getElementById("resetBtn").addEventListener("click", newGame);
+document.getElementById("viewBtn").addEventListener("click", resetView);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07111f);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+app.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.screenSpacePanning = true;
+controls.minDistance = 5;
+controls.maxDistance = 24;
+
+const root = new THREE.Group();
+scene.add(root);
+
+const gridGroup = new THREE.Group();
+const pieceGroup = new THREE.Group();
+const legalGroup = new THREE.Group();
+const winGroup = new THREE.Group();
+root.add(gridGroup, legalGroup, pieceGroup, winGroup);
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let hoverMesh = null;
+
+const matGrid = new THREE.LineBasicMaterial({ color: 0x8aa0bb, transparent: true, opacity: 0.43 });
+const matAxisX = new THREE.LineBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.75 });
+const matAxisY = new THREE.LineBasicMaterial({ color: 0x22c55e, transparent: true, opacity: 0.75 });
+const matAxisZ = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.75 });
+const matP1 = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.48, metalness: 0.18 });
+const matP2 = new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.48, metalness: 0.18 });
+const matLegal = new THREE.MeshStandardMaterial({
+  color: 0x38bdf8,
+  emissive: 0x0ea5e9,
+  emissiveIntensity: 0.6,
+  transparent: true,
+  opacity: 0.42,
+  roughness: 0.2,
+  metalness: 0.05
+});
+const matHover = new THREE.MeshStandardMaterial({
+  color: 0xfacc15,
+  emissive: 0xfacc15,
+  emissiveIntensity: 0.75,
+  transparent: true,
+  opacity: 0.58
+});
+const matWin = new THREE.MeshStandardMaterial({
+  color: 0xfacc15,
+  emissive: 0xfacc15,
+  emissiveIntensity: 1.0,
+  roughness: 0.2
+});
+
+const pieceGeometry = new THREE.CylinderGeometry(0.38, 0.38, 0.22, 48);
+const legalGeometry = new THREE.SphereGeometry(0.25, 24, 16);
+const winGeometry = new THREE.SphereGeometry(0.48, 32, 20);
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.85);
+scene.add(ambient);
+
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.35);
+keyLight.position.set(5, 8, 7);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0x60a5fa, 0.8);
+fillLight.position.set(-6, 2, -3);
+scene.add(fillLight);
+
+function centered(v) {
+  return (v - (N - 1) / 2) * CELL;
+}
+
+function positionOf(x, y, z) {
+  return new THREE.Vector3(centered(x), centered(z), centered(y));
+}
+
+function key(x, y, z) {
+  return `${x},${y},${z}`;
+}
+
+function idx(x, y, z) {
+  return z * N * N + y * N + x;
+}
+
+function get(x, y, z) {
+  return board[idx(x, y, z)];
+}
+
+function setCell(x, y, z, value) {
+  board[idx(x, y, z)] = value;
+}
+
+function inBounds(x, y, z) {
+  return x >= 0 && x < N && y >= 0 && y < N && z >= 0 && z < N;
+}
+
+function isLegal(x, y, z) {
+  if (gameOver || get(x, y, z) !== EMPTY) return false;
+  return z === 0 || get(x, y, z - 1) !== EMPTY;
+}
+
+function buildGrid() {
+  gridGroup.clear();
+
+  const min = centered(0);
+  const max = centered(N - 1);
+
+  function addLine(a, b, material = matGrid) {
+    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+    gridGroup.add(new THREE.Line(geo, material));
+  }
+
+  for (let x = 0; x < N; x++) {
+    for (let y = 0; y < N; y++) {
+      addLine(positionOf(x, y, 0), positionOf(x, y, N - 1));
+    }
+    for (let z = 0; z < N; z++) {
+      addLine(positionOf(x, 0, z), positionOf(x, N - 1, z));
+    }
+  }
+
+  for (let y = 0; y < N; y++) {
+    for (let z = 0; z < N; z++) {
+      addLine(positionOf(0, y, z), positionOf(N - 1, y, z));
+    }
+  }
+
+  addLine(new THREE.Vector3(min, min - 0.55, min), new THREE.Vector3(max, min - 0.55, min), matAxisX);
+  addLine(new THREE.Vector3(min, min - 0.55, min), new THREE.Vector3(min, min - 0.55, max), matAxisY);
+  addLine(new THREE.Vector3(min - 0.55, min, min), new THREE.Vector3(min - 0.55, max, min), matAxisZ);
+
+  addLabel("X", new THREE.Vector3(max + 0.55, min - 0.55, min), "#ef4444");
+  addLabel("Y", new THREE.Vector3(min, min - 0.55, max + 0.55), "#22c55e");
+  addLabel("Z", new THREE.Vector3(min - 0.55, max + 0.45, min), "#3b82f6");
+}
+
+function addLabel(text, pos, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "bold 42px system-ui";
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, 64, 32);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  sprite.position.copy(pos);
+  sprite.scale.set(0.75, 0.38, 1);
+  gridGroup.add(sprite);
+}
+
+function updateStatus() {
+  if (gameOver) return;
+  const cls = currentPlayer === 1 ? "p1" : "p2";
+  statusEl.innerHTML = `<span class="dot ${cls}"></span>Player ${currentPlayer}'s turn`;
+}
+
+function clearGroup(group) {
+  while (group.children.length) {
+    group.remove(group.children[0]);
+  }
+}
+
+function renderPiecesAndLegalMoves() {
+  clearGroup(pieceGroup);
+  clearGroup(legalGroup);
+  clearGroup(winGroup);
+
+  for (let z = 0; z < N; z++) {
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const value = get(x, y, z);
+        const p = positionOf(x, y, z);
+
+        if (value !== EMPTY) {
+          const mesh = new THREE.Mesh(pieceGeometry, value === 1 ? matP1 : matP2);
+          mesh.position.copy(p);
+          mesh.rotation.x = Math.PI / 2;
+          mesh.userData = { x, y, z, occupied: true };
+          pieceGroup.add(mesh);
+        } else if (isLegal(x, y, z)) {
+          const mesh = new THREE.Mesh(legalGeometry, matLegal);
+          mesh.position.copy(p);
+          mesh.userData = { x, y, z, legal: true };
+          legalGroup.add(mesh);
+        }
+
+        if (winningKeys.has(key(x, y, z))) {
+          const w = new THREE.Mesh(winGeometry, matWin);
+          w.position.copy(p);
+          winGroup.add(w);
+        }
+      }
+    }
+  }
+}
+
+function makeDirections() {
+  const dirs = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        if (dx === 0 && dy === 0 && dz === 0) continue;
+        if (dx < 0) continue;
+        if (dx === 0 && dy < 0) continue;
+        if (dx === 0 && dy === 0 && dz < 0) continue;
+        dirs.push([dx, dy, dz]);
+      }
+    }
+  }
+  return dirs;
+}
+
+const directions = makeDirections();
+
+function checkWin(player) {
+  for (let z = 0; z < N; z++) {
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        if (get(x, y, z) !== player) continue;
+
+        for (const [dx, dy, dz] of directions) {
+          const bx = x - dx, by = y - dy, bz = z - dz;
+          if (inBounds(bx, by, bz) && get(bx, by, bz) === player) continue;
+
+          const line = [];
+          for (let k = 0; k < WIN; k++) {
+            const nx = x + dx * k;
+            const ny = y + dy * k;
+            const nz = z + dz * k;
+            if (!inBounds(nx, ny, nz) || get(nx, ny, nz) !== player) break;
+            line.push([nx, ny, nz]);
+          }
+          if (line.length === WIN) return line;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function boardFull() {
+  return board.every(v => v !== EMPTY);
+}
+
+function placeAt(x, y, z) {
+  if (!isLegal(x, y, z)) return;
+
+  setCell(x, y, z, currentPlayer);
+  const winLine = checkWin(currentPlayer);
+
+  if (winLine) {
+    gameOver = true;
+    winningKeys = new Set(winLine.map(([x, y, z]) => key(x, y, z)));
+    const cls = currentPlayer === 1 ? "p1" : "p2";
+    statusEl.innerHTML = `<span class="dot ${cls}"></span>Player ${currentPlayer} wins`;
+  } else if (boardFull()) {
+    gameOver = true;
+    statusEl.textContent = "Draw.";
+  } else {
+    currentPlayer = currentPlayer === 1 ? 2 : 1;
+    updateStatus();
+  }
+
+  renderPiecesAndLegalMoves();
+}
+
+function updateMouse(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function updateHover(event) {
+  updateMouse(event);
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(legalGroup.children, false);
+
+  if (hoverMesh && hoverMesh !== hits[0]?.object) {
+    hoverMesh.material = matLegal;
+    hoverMesh.scale.set(1, 1, 1);
+  }
+
+  if (hits.length) {
+    hoverMesh = hits[0].object;
+    hoverMesh.material = matHover;
+    hoverMesh.scale.set(1.28, 1.28, 1.28);
+    const { x, y, z } = hoverMesh.userData;
+    coordEl.textContent = `legal: x=${x}, y=${y}, z=${z}`;
+  } else {
+    hoverMesh = null;
+    coordEl.textContent = "";
+  }
+}
+
+function handleClick(event) {
+  if (controls.dragging) return;
+  updateMouse(event);
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(legalGroup.children, false);
+  if (!hits.length) return;
+  const { x, y, z } = hits[0].object.userData;
+  placeAt(x, y, z);
+}
+
+renderer.domElement.addEventListener("pointermove", updateHover);
+renderer.domElement.addEventListener("click", handleClick);
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function resetView() {
+  camera.position.set(6.9, 6.2, 8.0);
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+function newGame() {
+  board = Array(N * N * N).fill(EMPTY);
+  currentPlayer = 1;
+  gameOver = false;
+  winningKeys = new Set();
+  updateStatus();
+  renderPiecesAndLegalMoves();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+buildGrid();
+resetView();
+newGame();
+animate();
+</script>
+</body>
+</html>
